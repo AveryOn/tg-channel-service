@@ -8,7 +8,7 @@ export const postCreateSchema = z.object({
 
 export type PostCreateSchema = z.infer<typeof postCreateSchema>;
 
-export interface Message {
+export interface OpenAiMessage {
   id: string;
   type: 'message';
   status: 'completed' | 'pending' | 'failed';

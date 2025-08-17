@@ -1,5 +1,5 @@
 import { connectApi } from '~/lib/openai';
-import { Message, PostCreateSchema } from './tg-channel.types';
+import { OpenAiMessage, PostCreateSchema } from './tg-channel.types';
 import { hashText, mdToHtml, substitute } from '~/utils/string';
 import { db } from '~/db';
 import { guinnessTopicsTable } from '~/db/schema';
@@ -79,7 +79,7 @@ async function createGuinnessPost() {
       version: '3',
     },
   });
-  const raw = prepareRes.output[0] as Message;
+  const raw = prepareRes.output[0] as OpenAiMessage;
 
   const newTitleRecord = raw.content[0].text;
   const hash = hashText(raw.content[0].text);
@@ -139,7 +139,7 @@ async function createGuinnessPost() {
     temperature: 0.4,
   });
 
-  const rawNewPost = createPostRes.output[0] as Message;
+  const rawNewPost = createPostRes.output[0] as OpenAiMessage;
   const newPostText = rawNewPost.content[0].text;
   console.debug('newPostText', newPostText);
 
