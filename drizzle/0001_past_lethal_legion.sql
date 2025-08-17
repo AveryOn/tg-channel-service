@@ -1,0 +1,1 @@
+ALTER TABLE `guinness_topics` ADD `template_key` integer DEFAULT 1 NOT NULL;

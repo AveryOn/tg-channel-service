@@ -1,0 +1,26 @@
+version: '3.9'
+
+services:
+  # gemma3:
+  #   image: ollama/ollama:latest
+  #   container_name: gemma3
+  #   restart: unless-stopped
+  #   ports:
+  #     - '${OLLAMA_PORT}:${OLLAMA_PORT}' # API Ollama
+  #   volumes:
+  #     - ./ollama:/root/.ollama # модели будут храниться на хосте, а не в контейнере
+
+  tg-channel:
+    build: .
+    container_name: tg-channel
+    restart: unless-stopped
+    depends_on:
+      - gemma3
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://gemma3:${OLLAMA_PORT}}
+      - TG_API_KEY=${TG_API_KEY:?TG_API_KEY is required}
+      - TG_CHANNEL_PORT=${TG_CHANNEL_PORT:?TG_CHANNEL_PORT_is_required}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - '${TG_CHANNEL_PORT}:${TG_CHANNEL_PORT}'
