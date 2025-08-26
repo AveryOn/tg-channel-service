@@ -22,8 +22,8 @@ app.route('/api', tgChannel);
 // app.delete('/users/:id', (c) => {
 //   const id = Number(c.req.param('id'));
 //   if (!users[id]) return c.json({ error: 'Not found' }, 404);
-//   const removed = users.splice(id, 1);
-//   return c.json(removed[0]);
+//   const removed = users.splice(id, 1)
+//   return c.json(removed[0])
 // });
 
 serve({
