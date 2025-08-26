@@ -10,7 +10,7 @@ app.route('/api', tgChannel);
 // app.get('/users', (c) => c.json(users));
 
 // app.put('/users/:id', async (c) => {
-//   const id = Number(c.req.param('id'));
+//   const id = Number(c.req.param('id'))
 //   const body = await c.req.json()
 //   const parsed = schema.safeParse(body);
 //   if (!parsed.success) return c.json(parsed.error, 400)
