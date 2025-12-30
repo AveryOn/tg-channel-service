@@ -12,6 +12,7 @@ export default [
     plugins: { prettier },
     rules: {
       'prettier/prettier': 'error',
+      'no-unused-vars': false,
     },
   },
 ];

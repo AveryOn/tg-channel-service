@@ -1,177 +1,361 @@
 import { connectApi } from '~/lib/openai';
-import { OpenAiMessage, PostCreateSchema } from './tg-channel.types';
-import { hashText, mdToHtml, substitute } from '~/utils/string';
+import { PostCreateSchema, SendMessageParams } from './tg-channel.types';
+import moment from 'moment';
+import { tasksTable, TaskStatus, TaskType, tgUsersTable } from '~/db/schema';
 import { db } from '~/db';
-import { guinnessTopicsTable } from '~/db/schema';
-import { desc } from 'drizzle-orm';
-import { connectTgApi } from '~/lib/tg-api';
+import { buildDayTasksMap, ReminderParseResult, Task, TasksMap } from '~/db/tasks-map';
+import { TelegramClient } from 'telegram';
+import { NewMessage, NewMessageEvent } from 'telegram/events';
+import { and, eq, isNull } from 'drizzle-orm';
+import { compareDates, getTimeByTemplate, getTZ, parseTimeToMs, today } from '~/utils/datetime';
+import z from 'zod';
+import { StringSession } from 'telegram/sessions';
+import { env } from '~/env';
 
-export const MAX_TEMPLATES_COUNT = 5;
+export enum UserCurrentStep {
+  start = 'start',
+  add_reminder = 'add_reminder',
+  wait_input_reminder_summary = 'wait_input_reminder_summary',
+  wait_input_reminder_date = 'wait_input_reminder_date',
+  reminder_success_created = 'reminder_success_created',
+}
+const userCallContext: Record<string, UserCurrentStep | string> = {};
 
-export const guinnessHeaderTexts = {
-  [0]: {
-    title:
-      '🥳 Поехали! Стартуем новую рубрику — самые безумные рекорды Guinness!',
-    subtitle: 'И первым будет: <b>{{title}}</b>',
-  },
-  [1]: {
-    title: '🚀 Йо! Снова в эфире подборка самых диких рекордов Guinness!',
-    subtitle: 'Сегодня в рубрике: <b>{{title}}</b>',
-  },
-  [2]: {
-    title: '😜 Скучно не будет — у нас новый безумный рекорд Guinness!',
-    subtitle: 'Сегодня в рубрике: <b>{{title}}</b>',
-  },
-  [3]: {
-    title:
-      '🏆 Сегодня в рубрике Guinness World Records — что-то совершенно необычное!',
-    subtitle: 'Рассмотрим рекорд: <b>{{title}}</b>',
-  },
-  [4]: {
-    title: '🤯 Ещё один сумасшедший рекорд Guinness подлетел в нашу коллекцию!',
-    subtitle: 'Сегодня в рубрике: <b>{{title}}</b>',
-  },
-  [5]: {
-    title: 'Хэй! 🙌 Добро пожаловать в рубрику безумные рекорды Guinness!',
-    subtitle: 'Сегодня в рубрике: <b>{{title}}</b>',
-  },
-} as const;
+const TG_API_ID = env.TG_API_ID;
+const TG_API_KEY = env.TG_API_KEY;
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
+let intervalId: NodeJS.Timeout | null = null
 
-export const guinnessFooterTexts = {
-  [0]: {
-    title: 'Если рубрика наберет миллион луцков то мы её продолжим',
-    subtitle: '(шутка. она итак продолжится 😈)',
-  },
-  [1]: {
-    title: 'А вы смогли бы побить такой рекорд?',
-    subtitle: 'Надо быть еще тем задротом)',
-  },
-  [2]: {
-    title: 'Кажется, границ для человеческой фантазии нет!',
-    subtitle: '',
-  },
-  [3]: {
-    title: 'Ещё один штрих в коллекцию мировых рекордов!',
-    subtitle: '',
-  },
-  [4]: {
-    title: 'Мир полон удивительных достижений, и это лишь одно из них.',
-    subtitle: '',
-  },
-  [5]: {
-    title: 'Пишите в комментах, какой рекорд впечатлил бы вас больше!',
-    subtitle: '',
-  },
-} as const;
 
-type TemplateKey = keyof typeof guinnessHeaderTexts;
+export const bot = new TelegramClient(
+  new StringSession(''),
+  TG_API_ID,
+  TG_API_KEY,
+  { connectionRetries: 5 },
+);
 
-async function createGuinnessPost() {
-  const promptsIds = {
-    prepare: 'pmpt_68a1c1dd89a08194b42be9fbd12eea7d048819d8e13503c5',
-  };
+/** Запуск ТГ-бота */
+export async function botStart() {
+  await bot.start({
+    botAuthToken: TG_BOT_TOKEN!,
+  });
+}
+
+/**
+ * Запуск каледнаря напоминаний
+ */
+export async function scheduleStart() {
+  // -----------------------TG_BOT-------------------------
+  bot.addEventHandler(
+    async (event) => handlerBotCommands(bot, event),
+    new NewMessage({ incoming: true }),
+  );
+  // -----------------------TG_BOT-------------------------
+  if(intervalId) {
+    clearInterval(intervalId)
+    intervalId = null
+  }
+  intervalId = setInterval(async () => {
+    const tasks: Task[] = (await db
+      .select()
+      .from(tasksTable)
+      .where(
+        and(
+          eq(tasksTable.status, TaskStatus.active),
+          isNull(tasksTable.lastRunAt),
+        )
+      )
+    ) as unknown as Task[];
+
+    tasks.map((task) => {
+      if (typeof task.parsedJson === 'string') {
+        task.parsedJson = JSON.parse(task.parsedJson);
+      }
+      return task;
+    });
+
+    // TODO в будущем внедрить batch size оптимизацию
+    const dayTasksMap = buildDayTasksMap(tasks, 30);
+
+    const todayKey = today();
+
+    const todayTasks = dayTasksMap[todayKey] ?? [];
+    console.debug('[SCHEDULE_JOB]', {
+      tasks: todayTasks.length,
+      today: todayKey,
+    })
+    await findAndCallReadyTasks(todayTasks);
+  }, 60 * 1000);
+}
+
+export async function handlerRawDataByAI(data: PostCreateSchema) {
   const openai = connectApi();
+
+  const now = moment().format('DD.MM.YYYYTHH:mm:ss');
+  const input = `${data.rawDeliveryAt};сегодня: ${now}`;
+  console.debug({input});
 
   // Получаем новое уникальное навание гиннес рекорда
   const prepareRes = await openai.responses.create({
     prompt: {
-      id: promptsIds.prepare,
-      version: '3',
+      id: 'pmpt_68b19a283b088190a6db53880c15023b00f114902b3c1450',
+      version: '7',
+      variables: {
+        input_text: input,
+      },
     },
   });
-  const raw = prepareRes.output[0] as OpenAiMessage;
+  const raw = JSON.parse(prepareRes?.output_text) as ReminderParseResult;
 
-  const newTitleRecord = raw.content[0].text;
-  const hash = hashText(raw.content[0].text);
-  // const text = 'Пример рекорда гинеса9';
-  // const hash = hashText(text);
-
-  const lastTopic = db
-    .select({ templateKey: guinnessTopicsTable.templateKey })
-    .from(guinnessTopicsTable)
-    .orderBy(desc(guinnessTopicsTable.createdAt))
-    .limit(1)
-    .get();
-
-  // Высчитываем номер шаблона для следующего поста
-  let newTemplateKey = lastTopic ? lastTopic.templateKey : 0;
-  if (lastTopic) {
-    const tmpKey = lastTopic.templateKey + 1;
-    if (lastTopic.templateKey > 0 && tmpKey <= 5) {
-      newTemplateKey = tmpKey;
-    } else {
-      newTemplateKey = 1;
-    }
+  // Если время не указано, то по умолчанию берем 9 утра
+  if (!raw.time) {
+    raw.time = '09:00:00';
   }
-
-  const result = await db
-    .insert(guinnessTopicsTable)
-    .values({
-      title: newTitleRecord,
-      hash,
-      templateKey: newTemplateKey,
-    })
-    .onConflictDoNothing();
-
-  // создано ничего не было, значит такой гиннес рекорд уже был создан ранее и нужно получить новый
-  if (!result.changes) {
-    console.warn('[Guinness] Duplicate:', { text: newTitleRecord, hash });
-    console.debug('Вызов рекурсии... ');
-    return await createGuinnessPost();
-  }
-
-  console.debug('[Guinness] New record:', { text: newTitleRecord, hash });
-
-  const prompts = [
-    `Detail Guinness record: "${newTitleRecord}". Start catchy (1–2 lines). Describe what, who, when/where. Add 1–2 facts. Max 4 paras, light style, emojis ok. In Russian.`,
-    `Short story for TG about Guinness record: "${newTitleRecord}". Start with "Did you know…" (1 para. In russian). Say who+when+how. End with joke/note, emojis ok. 2–3 paras. In Russian.`,
-    `TG fact-post about Guinness record: "${newTitleRecord}". 1st line: title+emoji. 2nd: 1 sentence what/who/where. 3rd: fact or number. Max 5 lines. In Russian.`,
-  ];
-
-  // случайный выбор промпта из заданных шаблонов
-  const idx = Math.floor(Math.random() * prompts.length);
-  const prompt = prompts[idx];
-  console.debug('[choosen prompt index]', idx);
-
-  const createPostRes = await openai.responses.create({
-    model: 'gpt-4o-mini',
-    input: prompt,
-    temperature: 0.4,
-  });
-
-  const rawNewPost = createPostRes.output[0] as OpenAiMessage;
-  const newPostText = rawNewPost.content[0].text;
-  console.debug('newPostText', newPostText);
-
-  // Формируем шаблон для нового поста
-  const template = `
-  🚀 <b>${guinnessHeaderTexts[newTemplateKey as TemplateKey].title}</b>
-
-  ${substitute(guinnessHeaderTexts[newTemplateKey as TemplateKey].subtitle, {
-    title: newTitleRecord,
-  })}
-
-  ${newPostText}
-  `;
-
-  const tg = await connectTgApi();
-  // test_marunova
-  await tg.sendMessage('test_marunova', {
-    message: mdToHtml(template),
-    parseMode: 'html',
-  });
-
-  return template;
+  return raw;
 }
 
-export async function createPost(body: PostCreateSchema) {
-  try {
-    if (body.topic === 'guinness') {
-      return await createGuinnessPost();
-    }
-    return;
-  } catch (err) {
-    console.error(err);
-    throw err;
+export async function sendMessage(
+  bot: TelegramClient,
+  params: SendMessageParams,
+) {
+
+  await bot.sendMessage(params.userId, {
+    message: params.message,
+  });
+}
+
+export async function handlerBotCommands(
+  bot: TelegramClient,
+  event: NewMessageEvent,
+) {
+  const msg = event.message;
+  if (!msg || !msg.text) return;
+
+  const text = msg.text.trim();
+  const senderId = msg.senderId!.valueOf();
+
+  const [user] = await db
+    .select({
+      id: tgUsersTable.id,
+      createdAt: tgUsersTable.createdAt,
+      updatedAt: tgUsersTable.updatedAt,
+    })
+    .from(tgUsersTable)
+    .where(eq(tgUsersTable.id, senderId));
+
+  if (!user) {
+    await db.insert(tgUsersTable).values({
+      id: senderId,
+    });
   }
+
+  console.debug({ userCallContext });
+
+  // COMMAND: /start
+  if (text.startsWith('/start')) {
+    userCallContext[senderId] = UserCurrentStep.start;
+
+    await bot.sendMessage(senderId, {
+      message:
+        'Здарова! Если хочешь создать новое напоминание вводи команду /add_reminder',
+    });
+
+    return;
+  }
+
+  // COMMAND: /add_reminder
+  if (text.startsWith('/add_reminder')) {
+    userCallContext[senderId] = UserCurrentStep.add_reminder;
+
+    await bot.sendMessage(senderId, {
+      message: 'Напиши текст напоминания. Что угодно!',
+    });
+    userCallContext[senderId] = UserCurrentStep.wait_input_reminder_summary;
+
+    return;
+  }
+
+  // Если пользователь отправил описания для напоминания
+  if (
+    userCallContext[senderId] === UserCurrentStep.wait_input_reminder_summary
+  ) {
+    console.debug('пользователь написал напоминание!', text);
+
+    // создаем задачу напоминание
+    const [newReminder] = await db
+      .insert(tasksTable)
+      .values({
+        status: TaskStatus.paused,
+        type: TaskType.reminder,
+        rawText: text,
+        timezone: getTZ(),
+        tgUserId: senderId,
+      })
+      .returning();
+
+    await bot.sendMessage(senderId, {
+      message:
+        'Супер! Записал твое напоминание. Укажи время, когда я должен присылать это напоминание:',
+    });
+    userCallContext[senderId] =
+      `${newReminder.id}/${UserCurrentStep.wait_input_reminder_date}`;
+
+    return;
+  }
+
+  // Если пользователь отправил дату для триггера напоминания
+  if (
+    userCallContext[senderId].includes(UserCurrentStep.wait_input_reminder_date)
+  ) {
+    console.debug(`SENDER-[${senderId}]:`, 'Пользователь ввел дату напоминания:', text);
+
+    // вытаскиваем из стейта айдишник напоминания который запоминили на предыдущем шаге
+    const [reminderId, __] = userCallContext[senderId].split('/');
+
+    // Валидируем что это действительно айдишник
+    const { success } = z.string().uuid().safeParse(reminderId)
+
+    // в случае если reminderId не валидный, бот отправляет сообщние юзеру и выходим
+    if(!success) {
+      console.warn(`SENDER-[${senderId}]: reminderId не валиден. Строка из userCallContext:`, { [senderId]: userCallContext[senderId] })
+      await bot.sendMessage(senderId, {
+        message: `Что-то пошло не так! Создать напоминание не удалить, обратитесь в поддержку с таким ID - \`${senderId}\``,
+      });
+      return;
+    }
+
+    // Находим по ID напоминание
+    const [reminder] = await db
+      .select({
+        id: tasksTable.id,
+        rawText: tasksTable.rawText,
+      })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, reminderId))
+
+    // если напоминания по такому ID не найдено
+    if(!reminder) {
+      console.warn(`SENDER-[${senderId}]: напоминание с ID ${reminderId} не найдено в Базе Данных`)
+      await bot.sendMessage(senderId, {
+        message: `Что-то пошло не так! Создать напоминание не удалить, обратитесь в поддержку с таким ID - \`${senderId}\``,
+      });
+      return;
+    }
+
+    // отправляем запрос на обработку сырого текста в AI агента
+    const parsedJSON = await handlerRawDataByAI({
+      rawDeliveryAt: text,
+      task: reminder.rawText
+    })
+
+    // TODO внедрить zod валидацию
+    // Если объект с расписанием не валидный
+    if(!parsedJSON) {
+      console.warn(`SENDER-[${senderId}]: ошибка в получении ответа от AI`, { parsedJSON })
+      await bot.sendMessage(senderId, {
+        message: `Что-то пошло не так! Создать напоминание не удалить, обратитесь в поддержку с таким ID - \`${senderId}\``,
+      });
+      return;
+    }
+
+    // Обновляем напоминание -> делаем его активным
+    const [updatedReminder] = await db
+      .update(tasksTable)
+      .set({
+        parsedJson: JSON.stringify(parsedJSON),
+        status: TaskStatus.active,
+        updatedAt: Date.now(),
+        rawDeliveryAt: text,
+      })
+      .where(eq(tasksTable.id, reminder.id))
+      .returning()
+
+    // Добавляем новое напоминание в общую карту
+    buildDayTasksMap([updatedReminder as Task], 30)
+
+    console.debug('Карта напоминаний обновлена!', { TasksMap, senderId: `${senderId}` })
+
+    await bot.sendMessage(senderId, {
+      message: 'Отлично! Напоминание успешно создано!',
+    });
+    userCallContext[senderId] = UserCurrentStep.reminder_success_created;
+
+    return;
+  }
+}
+
+/** Находит задачи которые готовы к вызову */
+function findReadyTasks(tasks: Task[]): Task[] {
+  console.debug('[CALL][findReadyTasks]')
+  const currentTime = getTimeByTemplate();
+  const currentDate = today();
+  const tz = getTZ();
+
+  const currentMs = parseTimeToMs(
+    `${currentDate}T${currentTime}`,
+    'DD.MM.YYYYTHH:mm:ss',
+    tz,
+  );
+
+  return tasks.filter((task) => {
+    if (!task.parsedJson) {
+      return false;
+    }
+
+    const time = task.parsedJson.time;
+    const date = task.parsedJson.next_date;
+    const taskSheduleMs = parseTimeToMs(
+      `${date}T${time}`,
+      'DD.MM.YYYYTHH:mm:ss',
+      tz,
+    );
+
+    const diff = compareDates(currentMs, taskSheduleMs);
+
+    // Если пришло время вызывать задачу
+    if (diff === 1 || diff === 0) {
+      return true;
+    }
+    // Если время вызывать задачу еще не наступило
+    else {
+      return false;
+    }
+  });
+}
+
+/** Вызвать готовые задачи (задачи, срок которых уже подошел) */
+async function callReadyTasks(tasks: Task[]) {
+  console.debug('[CALL][callReadyTasks]', { 'tasks.length': tasks.length })
+
+  for (let i = 0; i < tasks.length; i++) {
+
+    const task = tasks[i];
+    console.debug('READY TASK:', { task });
+
+    if(task.tgUserId) {
+      await sendMessage(bot, {
+        message: task.rawText,
+        userId: task.tgUserId,
+      });
+
+      // После успешного вызова напоминания, помечаем его в БД как выполненную
+      await db
+        .update(tasksTable)
+        .set({
+          status: TaskStatus.done,
+          updatedAt: Date.now(),
+          lastRunAt: Date.now(),
+        })
+        .where(eq(tasksTable.id, task.id))
+
+      // Также удаляем это напоминание с карты
+      // const todayKey = today();
+      // TasksMap[todayKey] = TasksMap[todayKey]?.filter((t) => t.id !== task.id)
+    }
+  }
+}
+
+async function findAndCallReadyTasks(tasks: Task[]) {
+  const readyTask = findReadyTasks(tasks);
+  await callReadyTasks(readyTask);
 }
