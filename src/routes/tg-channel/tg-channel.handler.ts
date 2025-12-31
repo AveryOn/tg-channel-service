@@ -39,53 +39,61 @@ export async function botStart() {
   await bot.start({
     botAuthToken: TG_BOT_TOKEN!,
   });
+  console.debug('[INFO] TG_BOT has been started!')
 }
 
 /**
  * Запуск каледнаря напоминаний
  */
 export async function scheduleStart() {
-  // -----------------------TG_BOT-------------------------
-  bot.addEventHandler(
-    async (event) => handlerBotCommands(bot, event),
-    new NewMessage({ incoming: true }),
-  );
-  // -----------------------TG_BOT-------------------------
-  if(intervalId) {
-    clearInterval(intervalId)
-    intervalId = null
-  }
-  intervalId = setInterval(async () => {
-    const tasks: Task[] = (await db
-      .select()
-      .from(tasksTable)
-      .where(
-        and(
-          eq(tasksTable.status, TaskStatus.active),
-          isNull(tasksTable.lastRunAt),
+  try {
+    // -----------------------TG_BOT-------------------------
+    bot.addEventHandler(
+      async (event) => handlerBotCommands(bot, event),
+      new NewMessage({ incoming: true }),
+    );
+    // -----------------------TG_BOT-------------------------
+    if(intervalId) {
+      clearInterval(intervalId)
+      intervalId = null
+    }
+    intervalId = setInterval(async () => {
+      const tasks: Task[] = (await db
+        .select()
+        .from(tasksTable)
+        .where(
+          and(
+            eq(tasksTable.status, TaskStatus.active),
+            isNull(tasksTable.lastRunAt),
+          )
         )
-      )
-    ) as unknown as Task[];
+      ) as unknown as Task[];
 
-    tasks.map((task) => {
-      if (typeof task.parsedJson === 'string') {
-        task.parsedJson = JSON.parse(task.parsedJson);
-      }
-      return task;
-    });
+      tasks.map((task) => {
+        if (typeof task.parsedJson === 'string') {
+          task.parsedJson = JSON.parse(task.parsedJson);
+        }
+        return task;
+      });
 
-    // TODO в будущем внедрить batch size оптимизацию
-    const dayTasksMap = buildDayTasksMap(tasks, 30);
+      // TODO в будущем внедрить batch size оптимизацию
+      const dayTasksMap = buildDayTasksMap(tasks, 30);
 
-    const todayKey = today();
+      const todayKey = today();
 
-    const todayTasks = dayTasksMap[todayKey] ?? [];
-    console.debug('[SCHEDULE_JOB]', {
-      tasks: todayTasks.length,
-      today: todayKey,
-    })
-    await findAndCallReadyTasks(todayTasks);
-  }, 60 * 1000);
+      const todayTasks = dayTasksMap[todayKey] ?? [];
+      console.debug('[SCHEDULE_JOB]', {
+        tasks: todayTasks.length,
+        today: todayKey,
+      })
+      await findAndCallReadyTasks(todayTasks);
+    }, 60 * 1000);
+
+    console.debug('[INFO] Schedule has been started!')
+  } catch (err) {
+    console.error('[ERROR] Ошибка при запуске Scheduler')
+  }
+
 }
 
 export async function handlerRawDataByAI(data: PostCreateSchema) {
