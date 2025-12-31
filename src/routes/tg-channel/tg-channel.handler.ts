@@ -43,6 +43,29 @@ export async function botStart() {
   console.debug('[INFO] TG_BOT has been started!')
 }
 
+async function buildTasksMap() {
+  const tasks: Task[] = (await db
+    .select()
+    .from(tasksTable)
+    .where(
+      and(
+        eq(tasksTable.status, TaskStatus.active),
+        isNull(tasksTable.lastRunAt),
+      )
+    )
+  ) as unknown as Task[];
+
+  tasks.map((task) => {
+    if (typeof task.parsedJson === 'string') {
+      task.parsedJson = JSON.parse(task.parsedJson);
+    }
+    return task;
+  });
+
+  // TODO в будущем внедрить batch size оптимизацию
+  dayTasksMap = buildDayTasksMap(tasks, 30);
+}
+
 /**
  * Запуск каледнаря напоминаний
  */
@@ -58,30 +81,10 @@ export async function scheduleStart() {
       clearInterval(intervalId)
       intervalId = null
     }
+    await buildTasksMap()
 
     intervalId = setInterval(async () => {
-      const tasks: Task[] = (await db
-        .select()
-        .from(tasksTable)
-        .where(
-          and(
-            eq(tasksTable.status, TaskStatus.active),
-            isNull(tasksTable.lastRunAt),
-          )
-        )
-      ) as unknown as Task[];
-
-      tasks.map((task) => {
-        if (typeof task.parsedJson === 'string') {
-          task.parsedJson = JSON.parse(task.parsedJson);
-        }
-        return task;
-      });
-
-      // TODO в будущем внедрить batch size оптимизацию
-      dayTasksMap = buildDayTasksMap(tasks, 30);
-
-
+      await buildTasksMap()
       const todayKey = today();
 
       const todayTasks = dayTasksMap[todayKey] ?? [];
@@ -270,7 +273,7 @@ export async function handlerBotCommands(
     }
 
     // Обновляем напоминание -> делаем его активным
-    const [updatedReminder] = await db
+    await db
       .update(tasksTable)
       .set({
         parsedJson: JSON.stringify(parsedJSON),
@@ -282,7 +285,7 @@ export async function handlerBotCommands(
       .returning()
 
     // Добавляем новое напоминание в общую карту
-    buildDayTasksMap([updatedReminder as Task], 30)
+    await buildTasksMap()
 
     console.debug('Карта напоминаний обновлена!', { TasksMap, senderId: `${senderId}` })
 
@@ -298,8 +301,10 @@ export async function handlerBotCommands(
   if(text.startsWith('/today_reminder_list')) {
     userCallContext[senderId] = UserCurrentStep.seeing_today_reminder_list
 
+    // await buildTasksMap()
+
     const list = dayTasksMap[today()]
-      .filter(t => t.tgUserId !== senderId)
+      .filter(t => t.tgUserId === senderId)
       .map((t, idx) => `[${idx + 1}] ${t.rawText}`)
       .join('\n')
 
