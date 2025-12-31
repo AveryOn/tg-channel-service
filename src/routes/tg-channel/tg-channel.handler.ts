@@ -52,12 +52,24 @@ async function buildTasksMap() {
     )
   ) as unknown as Task[];
 
-  tasks.map((task) => {
-    if (typeof task.parsedJson === 'string') {
-      task.parsedJson = JSON.parse(task.parsedJson);
-    }
-    return task;
-  });
+  tasks
+    .map((task) => {
+      if (typeof task.parsedJson === 'string') {
+        task.parsedJson = JSON.parse(task.parsedJson);
+      }
+      return task;
+    })
+    .filter((task) => {
+      const repeatableTask = task.parsedJson?.repeat !== 'none'
+      if(
+        !repeatableTask
+        && task.lastRunAt
+        && task.status === TaskStatus.done
+      ) {
+        return false;
+      }
+      return true
+    })
 
   // TODO в будущем внедрить batch size оптимизацию
   dayTasksMap = buildDayTasksMap(tasks, 30);
@@ -374,7 +386,7 @@ async function callReadyTasks(tasks: Task[]) {
         .update(tasksTable)
         .set({
           updatedAt: Date.now(),
-          status: repeatableTask
+          status: !repeatableTask
             ? TaskStatus.done
             : TaskStatus.active,
           lastRunAt: Date.now(),
