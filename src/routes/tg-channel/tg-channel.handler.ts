@@ -3,7 +3,7 @@ import { PostCreateSchema, SendMessageParams } from './tg-channel.types';
 import moment from 'moment';
 import { tasksTable, TaskStatus, TaskType, tgUsersTable } from '~/db/schema';
 import { db } from '~/db';
-import { buildDayTasksMap, ReminderParseResult, Task, TasksMap } from '~/db/tasks-map';
+import { buildDayTasksMap, DayTasksMap, ReminderParseResult, Task, TasksMap } from '~/db/tasks-map';
 import { TelegramClient } from 'telegram';
 import { NewMessage, NewMessageEvent } from 'telegram/events';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -18,6 +18,7 @@ export enum UserCurrentStep {
   wait_input_reminder_summary = 'wait_input_reminder_summary',
   wait_input_reminder_date = 'wait_input_reminder_date',
   reminder_success_created = 'reminder_success_created',
+  seeing_today_reminder_list = 'seeing_today_reminder_list',
 }
 const userCallContext: Record<string, UserCurrentStep | string> = {};
 
@@ -25,7 +26,7 @@ const TG_API_ID = env.TG_API_ID;
 const TG_API_KEY = env.TG_API_KEY;
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 let intervalId: NodeJS.Timeout | null = null
-
+let dayTasksMap: DayTasksMap = {}
 
 export const bot = new TelegramClient(
   new StringSession(''),
@@ -57,6 +58,7 @@ export async function scheduleStart() {
       clearInterval(intervalId)
       intervalId = null
     }
+
     intervalId = setInterval(async () => {
       const tasks: Task[] = (await db
         .select()
@@ -77,7 +79,8 @@ export async function scheduleStart() {
       });
 
       // TODO в будущем внедрить batch size оптимизацию
-      const dayTasksMap = buildDayTasksMap(tasks, 30);
+      dayTasksMap = buildDayTasksMap(tasks, 30);
+
 
       const todayKey = today();
 
@@ -213,7 +216,7 @@ export async function handlerBotCommands(
 
   // Если пользователь отправил дату для триггера напоминания
   if (
-    userCallContext[senderId].includes(UserCurrentStep.wait_input_reminder_date)
+    userCallContext[senderId]?.includes(UserCurrentStep.wait_input_reminder_date)
   ) {
     console.debug(`SENDER-[${senderId}]:`, 'Пользователь ввел дату напоминания:', text);
 
@@ -288,6 +291,21 @@ export async function handlerBotCommands(
     });
     userCallContext[senderId] = UserCurrentStep.reminder_success_created;
 
+    return;
+  }
+
+  // Если пользователь запросил список напоминаний на сегодня
+  if(text.startsWith('/today_reminder_list')) {
+    userCallContext[senderId] = UserCurrentStep.seeing_today_reminder_list
+
+    const list = dayTasksMap[today()]
+      .filter(t => t.tgUserId !== senderId)
+      .map((t, idx) => `[${idx + 1}] ${t.rawText}`)
+      .join('\n')
+
+    await bot.sendMessage(senderId, {
+      message: 'Список напоминаний на сегодня:\n\n' + list
+    });
     return;
   }
 }

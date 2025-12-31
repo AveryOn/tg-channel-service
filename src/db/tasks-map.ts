@@ -13,6 +13,7 @@ export interface ReminderParseResult {
 export type Task = {
   id: string;
   rawText: string;
+  rawDeliveryAt: string | null;
   nextRunAt: number | null;
   status: TaskStatus | string;
   lastRunAt: number | null;
