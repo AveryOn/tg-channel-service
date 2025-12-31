@@ -48,10 +48,7 @@ async function buildTasksMap() {
     .select()
     .from(tasksTable)
     .where(
-      and(
-        eq(tasksTable.status, TaskStatus.active),
-        isNull(tasksTable.lastRunAt),
-      )
+      eq(tasksTable.status, TaskStatus.active),
     )
   ) as unknown as Task[];
 
@@ -369,12 +366,17 @@ async function callReadyTasks(tasks: Task[]) {
         userId: task.tgUserId,
       });
 
+      // Является ли напоминание циклическим
+      const repeatableTask = task.parsedJson?.repeat !== 'none'
+
       // После успешного вызова напоминания, помечаем его в БД как выполненную
       await db
         .update(tasksTable)
         .set({
-          status: TaskStatus.done,
           updatedAt: Date.now(),
+          status: repeatableTask
+            ? TaskStatus.done
+            : TaskStatus.active,
           lastRunAt: Date.now(),
         })
         .where(eq(tasksTable.id, task.id))
