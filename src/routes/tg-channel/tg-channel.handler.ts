@@ -6,7 +6,7 @@ import { db } from '~/db';
 import { buildDayTasksMap, DayTasksMap, ReminderParseResult, Task, TasksMap } from '~/db/tasks-map';
 import { TelegramClient } from 'telegram';
 import { NewMessage, NewMessageEvent } from 'telegram/events';
-import { and, eq, isNull } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { compareDates, getTimeByTemplate, getTZ, parseTimeToMs, today } from '~/utils/datetime';
 import z from 'zod';
 import { StringSession } from 'telegram/sessions';
@@ -67,6 +67,15 @@ async function buildTasksMap() {
         && task.status === TaskStatus.done
       ) {
         return false;
+      }
+
+      const lastRunTaskDate: string | null = task.lastRunAt
+        ? moment(task.lastRunAt).format('DD.MM.YYYY')
+        : null
+
+      // Если задача циклическая и сегодня она уже выполнялась, то не пропускаем её в выборку
+      if(repeatableTask && today() === lastRunTaskDate) {
+        return false
       }
       return true
     })
@@ -394,8 +403,8 @@ async function callReadyTasks(tasks: Task[]) {
         .where(eq(tasksTable.id, task.id))
 
       // Также удаляем это напоминание с карты
-      // const todayKey = today();
-      // TasksMap[todayKey] = TasksMap[todayKey]?.filter((t) => t.id !== task.id)
+      const todayKey = today();
+      dayTasksMap[todayKey] = dayTasksMap[todayKey]?.filter((t) => t.id !== task.id)
     }
   }
 }
