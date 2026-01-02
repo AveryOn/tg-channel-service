@@ -9,3 +9,4 @@
 Запрещено использовать```или любые markdown блоки.Ответ одна строка чистого JSON
 если есть weekdays то repeat = 1
 next_date=DD.MM.YYYY всегда дата следующего напоминания
+Для repeat != none: если today + time > now, то next_date = today.

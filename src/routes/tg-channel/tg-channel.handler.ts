@@ -3,11 +3,11 @@ import { PostCreateSchema, SendMessageParams } from './tg-channel.types';
 import moment from 'moment';
 import { tasksTable, TaskStatus, TaskType, tgUsersTable } from '~/db/schema';
 import { db } from '~/db';
-import { buildDayTasksMap, DayTasksMap, ReminderParseResult, Task, TasksMap } from '~/db/tasks-map';
+import { buildDayTasksMap, DayTasksMap, ReminderParseResult, Task } from '~/db/tasks-map';
 import { TelegramClient } from 'telegram';
 import { NewMessage, NewMessageEvent } from 'telegram/events';
 import { eq } from 'drizzle-orm';
-import { compareDates, getTimeByTemplate, getTZ, parseTimeToMs, today } from '~/utils/datetime';
+import { calcNextRunAt, compareDates, getTimeByTemplate, getTZ, parseTimeToMs, today } from '~/utils/datetime';
 import z from 'zod';
 import { StringSession } from 'telegram/sessions';
 import { env } from '~/env';
@@ -52,7 +52,7 @@ async function buildTasksMap() {
     )
   ) as unknown as Task[];
 
-  tasks
+  const filteredTasks = tasks
     .map((task) => {
       if (typeof task.parsedJson === 'string') {
         task.parsedJson = JSON.parse(task.parsedJson);
@@ -69,19 +69,37 @@ async function buildTasksMap() {
         return false;
       }
 
+      const todayKey = today()
       const lastRunTaskDate: string | null = task.lastRunAt
         ? moment(task.lastRunAt).format('DD.MM.YYYY')
         : null
 
-      // Если задача циклическая и сегодня она уже выполнялась, то не пропускаем её в выборку
-      if(repeatableTask && today() === lastRunTaskDate) {
-        return false
+      const nextRunTaskDate: string | null = task.nextRunAt
+        ? moment(task.nextRunAt).format('DD.MM.YYYY')
+        : null
+
+      console.debug({ nextRunTaskDate, lastRunTaskDate, todayKey })
+
+      // Если задача циклическая
+      if(repeatableTask) {
+
+        console.debug({ repeatableTask, task: task.rawText })
+
+        // если задача уже выполнялась сегодня, не пропускаем её
+        if(lastRunTaskDate && todayKey === lastRunTaskDate) {
+          return false
+        }
+        // или если дата следующего вызова задачи НЕ сегодня
+        if(nextRunTaskDate && todayKey !== nextRunTaskDate) {
+          return false
+        }
       }
+      console.debug('ПРОПУСКАЕМ ->', task.rawText)
       return true
     })
 
   // TODO в будущем внедрить batch size оптимизацию
-  dayTasksMap = buildDayTasksMap(tasks, 30);
+  dayTasksMap = buildDayTasksMap(filteredTasks, 1);
 }
 
 /**
@@ -131,7 +149,7 @@ export async function handlerRawDataByAI(data: PostCreateSchema) {
   const prepareRes = await openai.responses.create({
     prompt: {
       id: 'pmpt_68b19a283b088190a6db53880c15023b00f114902b3c1450',
-      version: '7',
+      version: '8',
       variables: {
         input_text: input,
       },
@@ -207,7 +225,7 @@ export async function handlerBotCommands(
     return;
   }
 
-  // Если пользователь отправил описания для напоминания
+  // Если пользователь отправил описание для напоминания
   if (
     userCallContext[senderId] === UserCurrentStep.wait_input_reminder_summary
   ) {
@@ -280,8 +298,7 @@ export async function handlerBotCommands(
       task: reminder.rawText
     })
 
-    // TODO внедрить zod валидацию
-    // Если объект с расписанием не валидный
+    // Если объект с расписанием не валидный. TODO внедрить zod валидацию.
     if(!parsedJSON) {
       console.warn(`SENDER-[${senderId}]: ошибка в получении ответа от AI`, { parsedJSON })
       await bot.sendMessage(senderId, {
@@ -290,22 +307,28 @@ export async function handlerBotCommands(
       return;
     }
 
+    // Дата и время следующего вызова задачи
+    const nextRunAt = moment(
+      `${parsedJSON.next_date}T${parsedJSON.time}`,
+      'DD.MM.YYYYTHH:mm:ss',
+    ).valueOf();
+
     // Обновляем напоминание -> делаем его активным
     await db
       .update(tasksTable)
       .set({
         parsedJson: JSON.stringify(parsedJSON),
+        nextRunAt,
         status: TaskStatus.active,
         updatedAt: Date.now(),
         rawDeliveryAt: text,
       })
       .where(eq(tasksTable.id, reminder.id))
-      .returning()
 
     // Добавляем новое напоминание в общую карту
     await buildTasksMap()
 
-    console.debug('Карта напоминаний обновлена!', { TasksMap, senderId: `${senderId}` })
+    console.debug('Карта напоминаний обновлена!', { senderId: `${senderId}` })
 
     await bot.sendMessage(senderId, {
       message: 'Отлично! Напоминание успешно создано!',
@@ -320,6 +343,14 @@ export async function handlerBotCommands(
     userCallContext[senderId] = UserCurrentStep.seeing_today_reminder_list
 
     // await buildTasksMap()
+
+    const todayKey = today()
+    if(!dayTasksMap[todayKey]) {
+      await bot.sendMessage(senderId, {
+        message: 'Список напоминаний на сегодня пуст!'
+      });
+      return;
+    }
 
     const list = dayTasksMap[today()]
       .filter(t => t.tgUserId === senderId)
@@ -379,6 +410,7 @@ async function callReadyTasks(tasks: Task[]) {
   for (let i = 0; i < tasks.length; i++) {
 
     const task = tasks[i];
+    const nextRunAt = calcNextRunAt(task)
     console.debug('READY TASK:', { task });
 
     if(task.tgUserId) {
@@ -399,6 +431,7 @@ async function callReadyTasks(tasks: Task[]) {
             ? TaskStatus.done
             : TaskStatus.active,
           lastRunAt: Date.now(),
+          nextRunAt: nextRunAt,
         })
         .where(eq(tasksTable.id, task.id))
 

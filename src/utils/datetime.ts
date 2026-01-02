@@ -1,4 +1,5 @@
 import moment from 'moment';
+import { Task } from '~/db/tasks-map';
 
 /** @returns 'DD.MM.YYYY' */
 export const today = () => moment().format('DD.MM.YYYY');
@@ -51,4 +52,53 @@ export function compareDates(
   if (diff > 0) return 1;
   else if (diff < 0) return -1;
   return 0;
+}
+
+export function calcNextRunAt(task: Task): number | null {
+  const p = task.parsedJson;
+  if (!p || p.repeat === 'none') {
+    return null;
+  }
+
+  const interval = p.interval ?? 1;
+  const tz = p.timezone ?? 'UTC+4';
+
+  // точка отсчёта — момент фактического выполнения
+  let base = moment(task.lastRunAt ?? Date.now());
+
+  // всегда выставляем нужное время
+  const [hh, mm, ss] = p.time.split(':').map(Number);
+  base = base.set({ hour: hh, minute: mm, second: ss, millisecond: 0 });
+
+  switch (p.repeat) {
+    case 'daily':
+      base = base.add(interval, 'day');
+      break;
+
+    case 'weekly':
+      if (p.weekdays && p.weekdays.length > 0) {
+        // ищем ближайший разрешённый weekday
+        for (let i = 1; i <= 7; i++) {
+          const candidate = base.clone().add(i, 'day');
+          const wd = candidate.format('ddd').toLowerCase().slice(0, 3);
+          if (p.weekdays.includes(wd as any)) {
+            base = candidate;
+            break;
+          }
+        }
+      } else {
+        base = base.add(interval, 'week');
+      }
+      break;
+
+    case 'monthly':
+      base = base.add(interval, 'month');
+      break;
+
+    case 'yearly':
+      base = base.add(interval, 'year');
+      break;
+  }
+
+  return base.valueOf();
 }
