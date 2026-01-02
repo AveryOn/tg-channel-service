@@ -133,7 +133,7 @@ export async function scheduleStart() {
 
     console.debug('[INFO] Schedule has been started!')
   } catch (err) {
-    console.error('[ERROR] Ошибка при запуске Scheduler')
+    console.error('[ERROR] Ошибка при запуске Scheduler', err)
   }
 
 }
