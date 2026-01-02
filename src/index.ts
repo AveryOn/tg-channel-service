@@ -9,7 +9,7 @@ const app = new Hono();
 app.route('/api', tgChannel);
 
 (async () => {
-  if(env.NODE_ENV === 'development') {
+  if(env.NODE_ENV === 'production') {
     await botStart()
     await scheduleStart()
   }
