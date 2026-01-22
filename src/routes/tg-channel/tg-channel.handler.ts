@@ -207,7 +207,7 @@ export async function handlerBotCommands(
 
     await bot.sendMessage(senderId, {
       message:
-        'Здарова! Если хочешь создать новое напоминание вводи команду /add_reminder',
+        'Hi there! If you want to create a new reminder, enter the command /add_reminder',
     });
 
     return;
@@ -218,7 +218,7 @@ export async function handlerBotCommands(
     userCallContext[senderId] = UserCurrentStep.add_reminder;
 
     await bot.sendMessage(senderId, {
-      message: 'Напиши текст напоминания. Что угодно!',
+      message: 'Write a reminder text. Anything!',
     });
     userCallContext[senderId] = UserCurrentStep.wait_input_reminder_summary;
 
@@ -245,7 +245,7 @@ export async function handlerBotCommands(
 
     await bot.sendMessage(senderId, {
       message:
-        'Супер! Записал твое напоминание. Укажи время, когда я должен присылать это напоминание:',
+        'Great! I\'ve written down your reminder. Please tell me when I should send this reminder:',
     });
     userCallContext[senderId] =
       `${newReminder.id}/${UserCurrentStep.wait_input_reminder_date}`;
