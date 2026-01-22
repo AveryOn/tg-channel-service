@@ -331,7 +331,7 @@ export async function handlerBotCommands(
     console.debug('Карта напоминаний обновлена!', { senderId: `${senderId}` })
 
     await bot.sendMessage(senderId, {
-      message: 'Отлично! Напоминание успешно создано!',
+      message: 'Excellent! The reminder has been successfully created!',
     });
     userCallContext[senderId] = UserCurrentStep.reminder_success_created;
 
